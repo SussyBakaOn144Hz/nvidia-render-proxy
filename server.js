@@ -145,7 +145,10 @@ app.post("/v1/chat/completions", async (req, res) => {
   model: "z-ai/glm5",
   messages: finalMessages,
   stream: true,
-  max_tokens: 4096
+  max_tokens: 4096,
+     reasoning: {
+    enabled: true
+  }
 };
 
     const upstream = await axiosInstance.post(
