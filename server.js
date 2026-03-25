@@ -58,9 +58,7 @@ function estimateTokens(messages) {
 }
 
 app.post("/v1/chat/completions", async (req, res) => {
-
   try {
-
     const body = req.body;
     const convoId = getConversationId(body);
 
@@ -71,23 +69,18 @@ app.post("/v1/chat/completions", async (req, res) => {
     activeStreams.set(convoId, res);
 
     const lastMsg = body.messages?.slice(-1)[0]?.content?.trim().toLowerCase();
-
     const session = loadSession(convoId);
 
     if (lastMsg === "/reset") {
-
       const f = sessionFile(convoId);
-
       if (fs.existsSync(f)) fs.unlinkSync(f);
 
       return res.json({
         choices: [{ message: { role: "assistant", content: "(OOC: Memory reset.)" } }]
       });
-
     }
 
     if (lastMsg === "/stats") {
-
       const stats = {
         session_id: convoId,
         messages: session.messages.length,
@@ -103,11 +96,9 @@ app.post("/v1/chat/completions", async (req, res) => {
           }
         }]
       });
-
     }
 
     if (lastMsg === "/memory") {
-
       return res.json({
         choices: [{
           message: {
@@ -116,7 +107,6 @@ app.post("/v1/chat/completions", async (req, res) => {
           }
         }]
       });
-
     }
 
     session.messages = body.messages;
@@ -140,26 +130,26 @@ app.post("/v1/chat/completions", async (req, res) => {
 
     finalMessages.push(...session.messages);
 
-   const finalBody = {
-  ...body,
-  model: "z-ai/glm5",
-  messages: finalMessages,
-  stream: true,
-  max_tokens: 4096,
-     reasoning: {
-    enabled: true
-  }
-};
+    const finalBody = {
+      ...body,
+      model: "z-ai/glm5",
+      messages: finalMessages,
+      stream: true,
+      max_tokens: 4096,
+      reasoning: {
+        enabled: true
+      }
+    };
 
     const upstream = await axiosInstance.post(
       GLM_ENDPOINT,
       finalBody,
       {
         headers: {
-  Authorization: `Bearer ${API_KEY}`,
-  "Content-Type": "application/json",
-  Accept: "text/event-stream"
-},
+          Authorization: `Bearer ${API_KEY}`,
+          "Content-Type": "application/json",
+          Accept: "text/event-stream"
+        },
         responseType: "stream"
       }
     );
@@ -168,8 +158,34 @@ app.post("/v1/chat/completions", async (req, res) => {
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
 
+    // ✅ FIXED STREAM HANDLER (Chub-compatible)
     upstream.data.on("data", chunk => {
-      res.write(chunk);
+      const lines = chunk.toString().split("\n");
+
+      for (let line of lines) {
+        if (!line.startsWith("data:")) continue;
+
+        const jsonStr = line.replace("data:", "").trim();
+
+        if (jsonStr === "[DONE]") {
+          res.write("data: [DONE]\n\n");
+          return;
+        }
+
+        try {
+          const parsed = JSON.parse(jsonStr);
+
+          const delta = parsed?.choices?.[0]?.delta?.content;
+
+          // ✅ Only forward valid content chunks
+          if (delta !== undefined) {
+            res.write(`data: ${JSON.stringify(parsed)}\n\n`);
+          }
+
+        } catch {
+          // ignore invalid chunks
+        }
+      }
     });
 
     upstream.data.on("end", () => {
@@ -184,15 +200,12 @@ app.post("/v1/chat/completions", async (req, res) => {
     });
 
   } catch (err) {
-
     console.error(err);
 
     res.status(500).json({
       error: "proxy failure"
     });
-
   }
-
 });
 
 app.get("/ping", (req, res) => {
@@ -204,9 +217,7 @@ app.listen(PORT, () => {
 });
 
 setInterval(async () => {
-
   try {
     await axios.get(`http://localhost:${PORT}/ping`);
   } catch {}
-
 }, 240000);
