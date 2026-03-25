@@ -143,14 +143,14 @@ app.post("/v1/chat/completions", async (req, res) => {
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
 
-    // ✅ PROPER BUFFERED SSE PARSER
+    // ✅ FINAL STREAM FIX (buffer + rebuild OpenAI format)
     let buffer = "";
 
     upstream.data.on("data", chunk => {
       buffer += chunk.toString();
 
       let parts = buffer.split("\n\n");
-      buffer = parts.pop(); // keep incomplete part
+      buffer = parts.pop();
 
       for (let part of parts) {
         if (!part.startsWith("data:")) continue;
@@ -159,6 +159,7 @@ app.post("/v1/chat/completions", async (req, res) => {
 
         if (jsonStr === "[DONE]") {
           res.write("data: [DONE]\n\n");
+          res.end();
           return;
         }
 
@@ -167,10 +168,25 @@ app.post("/v1/chat/completions", async (req, res) => {
           const delta = parsed?.choices?.[0]?.delta?.content;
 
           if (delta !== undefined) {
-            res.write(`data: ${JSON.stringify(parsed)}\n\n`);
+            const rebuilt = {
+              id: "chatcmpl-" + Date.now(),
+              object: "chat.completion.chunk",
+              created: Math.floor(Date.now() / 1000),
+              model: "z-ai/glm5",
+              choices: [
+                {
+                  index: 0,
+                  delta: { content: delta },
+                  finish_reason: null
+                }
+              ]
+            };
+
+            res.write(`data: ${JSON.stringify(rebuilt)}\n\n`);
           }
+
         } catch {
-          // ignore incomplete JSON safely
+          // ignore safely
         }
       }
     });
@@ -189,192 +205,6 @@ app.post("/v1/chat/completions", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "proxy failure" });
-  }
-});
-
-app.get("/ping", (req, res) => {
-  res.send("alive");
-});
-
-app.listen(PORT, () => {
-  console.log("LLM Proxy running");
-});
-
-setInterval(async () => {
-  try {
-    await axios.get(`http://localhost:${PORT}/ping`);
-  } catch {}
-}, 240000);
-  return {
-    structured_memory: null,
-    messages: []
-  };
-}
-
-function saveSession(id, data) {
-  fs.writeFileSync(sessionFile(id), JSON.stringify(data));
-}
-
-function getConversationId(body) {
-  if (body.conversation_id) return body.conversation_id;
-
-  const base = body.messages?.[0]?.content || "default";
-  return crypto.createHash("sha256").update(base).digest("hex");
-}
-
-function estimateTokens(messages) {
-  const text = JSON.stringify(messages);
-  return Math.floor(text.length / 4);
-}
-
-app.post("/v1/chat/completions", async (req, res) => {
-  try {
-    const body = req.body;
-    const convoId = getConversationId(body);
-
-    if (activeStreams.has(convoId)) {
-      try { activeStreams.get(convoId).end(); } catch {}
-    }
-
-    activeStreams.set(convoId, res);
-
-    const lastMsg = body.messages?.slice(-1)[0]?.content?.trim().toLowerCase();
-    const session = loadSession(convoId);
-
-    if (lastMsg === "/reset") {
-      const f = sessionFile(convoId);
-      if (fs.existsSync(f)) fs.unlinkSync(f);
-
-      return res.json({
-        choices: [{ message: { role: "assistant", content: "(OOC: Memory reset.)" } }]
-      });
-    }
-
-    if (lastMsg === "/stats") {
-      const stats = {
-        session_id: convoId,
-        messages: session.messages.length,
-        estimated_tokens: estimateTokens(session.messages),
-        memory_present: !!session.structured_memory
-      };
-
-      return res.json({
-        choices: [{
-          message: {
-            role: "assistant",
-            content: `(OOC: Stats)\n${JSON.stringify(stats, null, 2)}`
-          }
-        }]
-      });
-    }
-
-    if (lastMsg === "/memory") {
-      return res.json({
-        choices: [{
-          message: {
-            role: "assistant",
-            content: `(OOC: Memory)\n${session.structured_memory || "No memory stored"}`
-          }
-        }]
-      });
-    }
-
-    session.messages = body.messages;
-    saveSession(convoId, session);
-
-    const finalMessages = [];
-
-    if (MASTER_PROMPT) {
-      finalMessages.push({
-        role: "system",
-        content: MASTER_PROMPT
-      });
-    }
-
-    if (session.structured_memory) {
-      finalMessages.push({
-        role: "system",
-        content: "LONG-TERM MEMORY:\n" + session.structured_memory
-      });
-    }
-
-    finalMessages.push(...session.messages);
-
-    const finalBody = {
-      ...body,
-      model: "z-ai/glm5",
-      messages: finalMessages,
-      stream: true,
-      max_tokens: 4096,
-      reasoning: {
-        enabled: true
-      }
-    };
-
-    const upstream = await axiosInstance.post(
-      GLM_ENDPOINT,
-      finalBody,
-      {
-        headers: {
-          Authorization: `Bearer ${API_KEY}`,
-          "Content-Type": "application/json",
-          Accept: "text/event-stream"
-        },
-        responseType: "stream"
-      }
-    );
-
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection", "keep-alive");
-
-    // ✅ FIXED STREAM HANDLER (Chub-compatible)
-    upstream.data.on("data", chunk => {
-      const lines = chunk.toString().split("\n");
-
-      for (let line of lines) {
-        if (!line.startsWith("data:")) continue;
-
-        const jsonStr = line.replace("data:", "").trim();
-
-        if (jsonStr === "[DONE]") {
-          res.write("data: [DONE]\n\n");
-          return;
-        }
-
-        try {
-          const parsed = JSON.parse(jsonStr);
-
-          const delta = parsed?.choices?.[0]?.delta?.content;
-
-          // ✅ Only forward valid content chunks
-          if (delta !== undefined) {
-            res.write(`data: ${JSON.stringify(parsed)}\n\n`);
-          }
-
-        } catch {
-          // ignore invalid chunks
-        }
-      }
-    });
-
-    upstream.data.on("end", () => {
-      res.end();
-      activeStreams.delete(convoId);
-    });
-
-    upstream.data.on("error", err => {
-      console.error(err);
-      res.end();
-      activeStreams.delete(convoId);
-    });
-
-  } catch (err) {
-    console.error(err);
-
-    res.status(500).json({
-      error: "proxy failure"
-    });
   }
 });
 
