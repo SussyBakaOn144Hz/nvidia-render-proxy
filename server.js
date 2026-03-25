@@ -44,10 +44,6 @@ function getConversationId(body) {
   return crypto.createHash("sha256").update(base).digest("hex");
 }
 
-function estimateTokens(messages) {
-  return Math.floor(JSON.stringify(messages).length / 4);
-}
-
 app.post("/v1/chat/completions", async (req, res) => {
   try {
     const body = req.body;
@@ -59,46 +55,7 @@ app.post("/v1/chat/completions", async (req, res) => {
 
     activeStreams.set(convoId, res);
 
-    const lastMsg = body.messages?.slice(-1)[0]?.content?.trim().toLowerCase();
     const session = loadSession(convoId);
-
-    if (lastMsg === "/reset") {
-      const f = sessionFile(convoId);
-      if (fs.existsSync(f)) fs.unlinkSync(f);
-      return res.json({
-        choices: [{ message: { role: "assistant", content: "(OOC: Memory reset.)" } }]
-      });
-    }
-
-    if (lastMsg === "/stats") {
-      const stats = {
-        session_id: convoId,
-        messages: session.messages.length,
-        estimated_tokens: estimateTokens(session.messages),
-        memory_present: !!session.structured_memory
-      };
-
-      return res.json({
-        choices: [{
-          message: {
-            role: "assistant",
-            content: `(OOC: Stats)\n${JSON.stringify(stats, null, 2)}`
-          }
-        }]
-      });
-    }
-
-    if (lastMsg === "/memory") {
-      return res.json({
-        choices: [{
-          message: {
-            role: "assistant",
-            content: `(OOC: Memory)\n${session.structured_memory || "No memory stored"}`
-          }
-        }]
-      });
-    }
-
     session.messages = body.messages;
     saveSession(convoId, session);
 
@@ -117,18 +74,15 @@ app.post("/v1/chat/completions", async (req, res) => {
 
     finalMessages.push(...session.messages);
 
-    const finalBody = {
-      ...body,
-      model: "z-ai/glm5",
-      messages: finalMessages,
-      stream: true,
-      max_tokens: 4096,
-      reasoning: { enabled: true }
-    };
-
     const upstream = await axiosInstance.post(
       GLM_ENDPOINT,
-      finalBody,
+      {
+        model: "z-ai/glm5",
+        messages: finalMessages,
+        stream: true,
+        max_tokens: 4096,
+        reasoning: { enabled: true }
+      },
       {
         headers: {
           Authorization: `Bearer ${API_KEY}`,
@@ -143,81 +97,34 @@ app.post("/v1/chat/completions", async (req, res) => {
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
 
-    // ✅ FINAL STREAM FIX (buffer + rebuild OpenAI format)
     let buffer = "";
+    let queue = [];
+    let sending = false;
+    let wordBuffer = "";
 
-    upstream.data.on("data", chunk => {
-      buffer += chunk.toString();
+    function enqueueWords(text) {
+      wordBuffer += text;
 
-      let parts = buffer.split("\n\n");
-      buffer = parts.pop();
+      let parts = wordBuffer.split(/(\s+)/); // keeps spaces
+
+      wordBuffer = parts.pop(); // incomplete word stays
 
       for (let part of parts) {
-        if (!part.startsWith("data:")) continue;
-
-        const jsonStr = part.replace("data:", "").trim();
-
-        if (jsonStr === "[DONE]") {
-          res.write("data: [DONE]\n\n");
-          res.end();
-          return;
-        }
-
-        try {
-          const parsed = JSON.parse(jsonStr);
-          const delta = parsed?.choices?.[0]?.delta?.content;
-
-          if (delta !== undefined) {
-            const rebuilt = {
-              id: "chatcmpl-" + Date.now(),
-              object: "chat.completion.chunk",
-              created: Math.floor(Date.now() / 1000),
-              model: "z-ai/glm5",
-              choices: [
-                {
-                  index: 0,
-                  delta: { content: delta },
-                  finish_reason: null
-                }
-              ]
-            };
-
-            res.write(`data: ${JSON.stringify(rebuilt)}\n\n`);
-          }
-
-        } catch {
-          // ignore safely
-        }
+        queue.push(part);
       }
-    });
+    }
 
-    upstream.data.on("end", () => {
-      res.end();
-      activeStreams.delete(convoId);
-    });
+    function sendNext() {
+      if (queue.length === 0) {
+        sending = false;
+        return;
+      }
 
-    upstream.data.on("error", err => {
-      console.error(err);
-      res.end();
-      activeStreams.delete(convoId);
-    });
+      sending = true;
 
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "proxy failure" });
-  }
-});
+      const word = queue.shift();
 
-app.get("/ping", (req, res) => {
-  res.send("alive");
-});
-
-app.listen(PORT, () => {
-  console.log("LLM Proxy running");
-});
-
-setInterval(async () => {
-  try {
-    await axios.get(`http://localhost:${PORT}/ping`);
-  } catch {}
-}, 240000);
+      const chunk = {
+        id: "chatcmpl-" + Date.now(),
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1000),
