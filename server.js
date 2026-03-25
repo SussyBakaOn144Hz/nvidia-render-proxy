@@ -219,8 +219,7 @@ app.post("/v1/chat/completions", async (req, res) => {
         model: "z-ai/glm5",
         messages: finalMessages,
         stream: true,
-        max_tokens: 4096,
-        reasoning: { enabled: true }
+        max_tokens: 4096
       },
       {
         headers: {
