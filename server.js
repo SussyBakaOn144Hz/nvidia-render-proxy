@@ -79,7 +79,7 @@ app.post("/v1/chat/completions", async (req, res) => {
       GLM_ENDPOINT,
       {
         ...body,
-        model: process.env.MODEL_NAME || "z-ai/glm5",
+        model: "z-ai/glm5",
         messages: finalMessages,
         stream: true,
         max_tokens: 4096,
