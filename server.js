@@ -57,7 +57,7 @@ app.post("/v1/chat/completions", async (req, res) => {
     const session = loadSession(convoId);
 
     // 🔥 LIMIT CONTEXT (prevents drift in Chub)
-    session.messages = body.messages.slice(-14);
+    session.messages = body.messages;
     saveSession(convoId, session);
 
     const finalMessages = [];
@@ -81,7 +81,7 @@ app.post("/v1/chat/completions", async (req, res) => {
         model: process.env.MODEL_NAME || "z-ai/glm5",
         messages: finalMessages,
         stream: true,
-        max_tokens: 800   // 🔥 prevents runaway responses
+        max_tokens: 4096   // 🔥 prevents runaway responses
       },
       {
         headers: {
