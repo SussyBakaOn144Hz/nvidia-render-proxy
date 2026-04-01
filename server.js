@@ -45,8 +45,6 @@ function getConversationId(body) {
 }
 
 app.post("/v1/chat/completions", async (req, res) => {
-  let closed = false; // 🔥 FIX
-
   try {
     const body = req.body;
     const convoId = getConversationId(body);
@@ -58,6 +56,7 @@ app.post("/v1/chat/completions", async (req, res) => {
 
     const session = loadSession(convoId);
 
+    // 🔥 LIMIT CONTEXT (prevents drift in Chub)
     session.messages = body.messages;
     saveSession(convoId, session);
 
@@ -84,11 +83,8 @@ app.post("/v1/chat/completions", async (req, res) => {
         messages: finalMessages,
         stream: true,
         max_tokens: 4096,
-        chat_template_kwargs: {
-          enable_thinking: true,
-          clear_thinking: false
-        },
-        reasoning: { enabled: true }
+        chat_template_kwargs: {"enable_thinking":true,"clear_thinking":false},
+        reasoning: { enabled: true }// 🔥 prevents runaway responses
       },
       {
         headers: {
@@ -107,8 +103,6 @@ app.post("/v1/chat/completions", async (req, res) => {
     let buffer = "";
 
     upstream.data.on("data", chunk => {
-      if (closed) return; // 🔥 prevent writes after close
-
       buffer += chunk.toString();
 
       const events = buffer.split("\n\n");
@@ -120,16 +114,14 @@ app.post("/v1/chat/completions", async (req, res) => {
         const data = event.replace("data:", "").trim();
 
         if (data === "[DONE]") {
-          if (!closed) {
-            res.write("data: [DONE]\n\n");
-            res.end();
-            closed = true;
-          }
+          res.write("data: [DONE]\n\n");
+          res.end();
           return;
         }
 
         try {
           const parsed = JSON.parse(data);
+
           const delta = parsed?.choices?.[0]?.delta;
           if (!delta) continue;
 
@@ -154,28 +146,19 @@ app.post("/v1/chat/completions", async (req, res) => {
     });
 
     upstream.data.on("end", () => {
-      if (!closed) {
-        res.end();
-        closed = true;
-      }
+      res.end();
       activeStreams.delete(convoId);
     });
 
     upstream.data.on("error", err => {
       console.error(err);
-      if (!closed) {
-        res.end();
-        closed = true;
-      }
+      res.end();
       activeStreams.delete(convoId);
     });
 
   } catch (err) {
     console.error(err);
-    if (!closed) {
-      res.status(500).json({ error: "proxy failure" });
-      closed = true;
-    }
+    res.status(500).json({ error: "proxy failure" });
   }
 });
 
@@ -187,6 +170,7 @@ app.listen(PORT, () => {
   console.log("LLM Proxy running");
 });
 
+// keep render alive
 setInterval(async () => {
   try {
     await axios.get(`http://localhost:${PORT}/ping`);
