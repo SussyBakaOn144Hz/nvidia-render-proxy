@@ -83,8 +83,8 @@ app.post("/v1/chat/completions", async (req, res) => {
         messages: finalMessages,
         stream: true,
         max_tokens: 4096,
-        chat_template_kwargs: {"enable_thinking":true,"clear_thinking":false},
-        reasoning: { enabled: true }// 🔥 prevents runaway responses
+        chat_template_kwargs: {"enable_thinking":true,"clear_thinking":false}
+        // 🔥 prevents runaway responses
       },
       {
         headers: {
