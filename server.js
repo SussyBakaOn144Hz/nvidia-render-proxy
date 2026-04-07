@@ -78,11 +78,13 @@ app.post("/v1/chat/completions", async (req, res) => {
     const upstream = await axiosInstance.post(
       GLM_ENDPOINT,
       {
+        ...body,
         model: process.env.MODEL_NAME || "z-ai/glm5",
         messages: finalMessages,
         stream: true,
         max_tokens: 4096,
-    chat_template_kwargs: {"enable_thinking":true}
+        chat_template_kwargs: {thinking: true},
+        reasoning: { enabled: true }// 🔥 prevents runaway responses
       },
       {
         headers: {
