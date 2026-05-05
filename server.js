@@ -82,7 +82,7 @@ app.post("/v1/chat/completions", async (req, res) => {
         model: process.env.MODEL_NAME || "z-ai/glm5",
         messages: finalMessages,
         stream: true,
-        max_tokens: 4096,
+        max_tokens: 800,
         chat_template_kwargs: {"thinking":true}
       // 🔥 prevents runaway responses
       },
