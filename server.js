@@ -13,7 +13,7 @@ const PORT = process.env.PORT || 10000;
 const API_KEY = process.env.GLM_API_KEY;
 const MASTER_PROMPT = process.env.MASTER_PROMPT || "";
 
-const GLM_ENDPOINT = "https://integrate.api.nvidia.com/v1/chat/completions";
+const GLM_ENDPOINT = "https://llm.onerouter.pro/v1/chat/completions
 
 const axiosInstance = axios.create({
   timeout: 600000
