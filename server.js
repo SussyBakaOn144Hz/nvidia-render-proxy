@@ -1,9 +1,12 @@
 const express = require("express");
 const axios = require("axios");
-const fs = require("fs");
+const fs = require("fs").promises; // ⚡ Changed to promises for async non-blocking file I/O
+const fsSync = require("fs");      // Used strictly for initial directory creation check
 const path = require("path");
 const crypto = require("crypto");
 const cors = require("cors");
+const https = require("https");    // ⚡ Added for TCP Connection Pooling
+const http = require("http");      // ⚡ Added for ultra-lean internal pings
 
 const app = express();
 app.use(cors());
@@ -13,14 +16,20 @@ const PORT = process.env.PORT || 10000;
 const API_KEY = process.env.GLM_API_KEY;
 const MASTER_PROMPT = process.env.MASTER_PROMPT || "";
 
-const GLM_ENDPOINT = "https://llm.onerouter.pro/v1/chat/completions";
+const GLM_ENDPOINT = "https://integrate.api.nvidia.com/v1/chat/completions";
 
+// ⚡ Optimized Axios Instance with Persistent TCP Sockets
 const axiosInstance = axios.create({
-  timeout: 600000
+  timeout: 600000,
+  httpsAgent: new https.Agent({
+    keepAlive: true,        // Reuses the same network socket for subsequent messages
+    maxSockets: 100,        // Max concurrent open sockets
+    keepAliveMsecs: 1000    // Keeps the channel hot
+  })
 });
 
 const SESS_DIR = path.join(__dirname, "sessions");
-if (!fs.existsSync(SESS_DIR)) fs.mkdirSync(SESS_DIR);
+if (!fsSync.existsSync(SESS_DIR)) fsSync.mkdirSync(SESS_DIR);
 
 const activeStreams = new Map();
 
@@ -28,14 +37,24 @@ function sessionFile(id) {
   return path.join(SESS_DIR, `${id}.json`);
 }
 
-function loadSession(id) {
+// ⚡ Refactored to handle asynchronous non-blocking disk reads
+async function loadSession(id) {
   const f = sessionFile(id);
-  if (fs.existsSync(f)) return JSON.parse(fs.readFileSync(f));
-  return { structured_memory: null, messages: [] };
+  try {
+    const data = await fs.readFile(f, "utf8");
+    return JSON.parse(data);
+  } catch {
+    return { structured_memory: null, messages: [] };
+  }
 }
 
-function saveSession(id, data) {
-  fs.writeFileSync(sessionFile(id), JSON.stringify(data));
+// ⚡ Refactored to handle asynchronous non-blocking disk writes
+async function saveSession(id, data) {
+  try {
+    await fs.writeFile(sessionFile(id), JSON.stringify(data));
+  } catch (err) {
+    console.error("Session save error:", err);
+  }
 }
 
 function getConversationId(body) {
@@ -45,20 +64,21 @@ function getConversationId(body) {
 }
 
 app.post("/v1/chat/completions", async (req, res) => {
-  try {
-    const body = req.body;
-    const convoId = getConversationId(body);
+  const body = req.body;
+  const convoId = getConversationId(body);
 
+  try {
     if (activeStreams.has(convoId)) {
       try { activeStreams.get(convoId).end(); } catch {}
     }
     activeStreams.set(convoId, res);
 
-    const session = loadSession(convoId);
+    // ⚡ Await the async file reader
+    const session = await loadSession(convoId);
 
-    // 🔥 LIMIT CONTEXT (prevents drift in Chub)
-    session.messages = body.messages;
-    saveSession(convoId, session);
+    session.messages = body.messages || [];
+    // ⚡ Await the async file writer
+    await saveSession(convoId, session);
 
     const finalMessages = [];
 
@@ -82,9 +102,8 @@ app.post("/v1/chat/completions", async (req, res) => {
         model: process.env.MODEL_NAME || "z-ai/glm5",
         messages: finalMessages,
         stream: true,
-        max_tokens: 4096,
-        chat_template_kwargs: {"enable_thinking":true,"clear_thinking":false}
-      // 🔥 prevents runaway responses
+        max_tokens: 4096, // Preserved exactly as requested
+        chat_template_kwargs: { "enable_thinking": true, "clear_thinking": false } // Preserved exactly as requested
       },
       {
         headers: {
@@ -105,13 +124,16 @@ app.post("/v1/chat/completions", async (req, res) => {
     upstream.data.on("data", chunk => {
       buffer += chunk.toString();
 
-      const events = buffer.split("\n\n");
-      buffer = events.pop();
+      // ⚡ High-performance stream scanning (Prevents fragmentation chunk drops)
+      let lineIndex;
+      while ((lineIndex = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.substring(0, lineIndex).trim();
+        buffer = buffer.substring(lineIndex + 1);
 
-      for (const event of events) {
-        if (!event.startsWith("data:")) continue;
+        if (!line.startsWith("data:")) continue;
 
-        const data = event.replace("data:", "").trim();
+        // Fast slice execution instead of allocating new strings via string replacements
+        const data = line.slice(5).trim();
 
         if (data === "[DONE]") {
           res.write("data: [DONE]\n\n");
@@ -121,26 +143,24 @@ app.post("/v1/chat/completions", async (req, res) => {
 
         try {
           const parsed = JSON.parse(data);
-
           const delta = parsed?.choices?.[0]?.delta;
           if (!delta) continue;
 
           const out = {
-            id: "chatcmpl-" + Date.now(),
+            id: parsed.id || "chatcmpl-" + Date.now(),
             object: "chat.completion.chunk",
-            created: Math.floor(Date.now() / 1000),
+            created: parsed.created || Math.floor(Date.now() / 1000),
             model: process.env.MODEL_NAME || "z-ai/glm5",
             choices: [
               {
                 index: 0,
                 delta: delta,
-                finish_reason: null
+                finish_reason: parsed.choices?.[0]?.finish_reason || null
               }
             ]
           };
 
           res.write(`data: ${JSON.stringify(out)}\n\n`);
-
         } catch {}
       }
     });
@@ -159,6 +179,7 @@ app.post("/v1/chat/completions", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "proxy failure" });
+    activeStreams.delete(convoId);
   }
 });
 
@@ -167,12 +188,12 @@ app.get("/ping", (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log("LLM Proxy running");
+  console.log("LLM Proxy running optimally");
 });
 
-// keep render alive
-setInterval(async () => {
-  try {
-    await axios.get(`http://localhost:${PORT}/ping`);
-  } catch {}
+// ⚡ Ultra-lean native keep-alive loop (Removes Axios wrapper allocations)
+setInterval(() => {
+  http.get(`http://localhost:${PORT}/ping`, (res) => {
+    res.resume(); // Consume response memory immediately
+  }).on("error", () => {});
 }, 240000);
