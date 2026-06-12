@@ -103,9 +103,8 @@ app.post("/v1/chat/completions", async (req, res) => {
         messages: finalMessages,
         stream: true,
         temperature: 1,
-        reasoning_budget: 8192,
         max_tokens: 4096, // Preserved exactly as requested
-        chat_template_kwargs: { "enable_thinking":true } // Preserved exactly as requested
+        chat_template_kwargs: { "thinking_mode": "enabled" } // Preserved exactly as requested
       },
       {
         headers: {
