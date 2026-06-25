@@ -102,9 +102,8 @@ app.post("/v1/chat/completions", async (req, res) => {
         model: process.env.MODEL_NAME || "z-ai/glm5",
         messages: finalMessages,
         stream: true,
-        temperature: 1,
         max_tokens: 4096, // Preserved exactly as requested
-        chat_template_kwargs: { "thinking_mode": "enabled" } // Preserved exactly as requested
+        chat_template_kwargs: { "enable_thinking": true } // Preserved exactly as requested
       },
       {
         headers: {
