@@ -104,7 +104,7 @@ app.post("/v1/chat/completions", async (req, res) => {
         stream: true,
         max_tokens: 2048,
         reasoning_budget: 2048,
-        chat_template_kwargs: {"enable_thinking":true}// Preserved exactly as requested
+        chat_template_kwargs: {"enable_thinking":true, "reasoning_effort":"medium"}// Preserved exactly as requested
          // Preserved exactly as requested
       },
       {
