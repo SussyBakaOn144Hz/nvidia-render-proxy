@@ -16,7 +16,7 @@ const PORT = process.env.PORT || 10000;
 const API_KEY = process.env.GLM_API_KEY;
 const MASTER_PROMPT = process.env.MASTER_PROMPT || "";
 
-const GLM_ENDPOINT = "https://nim.api.nvidia.com/v1/chat/completions";
+const GLM_ENDPOINT = "https://integrate.api.nvidia.com/v1/chat/completions";
 
 // ⚡ Optimized Axios Instance with Persistent TCP Sockets
 const axiosInstance = axios.create({
@@ -101,7 +101,8 @@ app.post("/v1/chat/completions", async (req, res) => {
         ...body,
         model: process.env.MODEL_NAME || "z-ai/glm5",
         messages: finalMessages,
-        stream: true// Preserved exactly as requested
+        stream: true,
+        chat_template_kwargs: {"enable_thinking":true, "clear_thinking":false}// Preserved exactly as requested
          // Preserved exactly as requested
       },
       {
