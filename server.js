@@ -102,7 +102,7 @@ app.post("/v1/chat/completions", async (req, res) => {
         model: process.env.MODEL_NAME || "z-ai/glm5",
         messages: finalMessages,
         stream: true,
-        chat_template_kwargs: {"enable_thinking":true, "clear_thinking":false}// Preserved exactly as requested
+        chat_template_kwargs: {"thinking":true,"reasoning_effort":"high"}// Preserved exactly as requested
          // Preserved exactly as requested
       },
       {
