@@ -1,12 +1,12 @@
 const express = require("express");
 const axios = require("axios");
-const fs = require("fs").promises; // ⚡ Changed to promises for async non-blocking file I/O
-const fsSync = require("fs");      // Used strictly for initial directory creation check
+const fs = require("fs").promises;
+const fsSync = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const cors = require("cors");
-const https = require("https");    // ⚡ Added for TCP Connection Pooling
-const http = require("http");      // ⚡ Added for ultra-lean internal pings
+const https = require("https");
+const http = require("http");
 
 const app = express();
 app.use(cors());
@@ -15,16 +15,16 @@ app.use(express.json({ limit: "20mb" }));
 const PORT = process.env.PORT || 10000;
 const API_KEY = process.env.GLM_API_KEY;
 const MASTER_PROMPT = process.env.MASTER_PROMPT || "";
+const MODEL_NAME = process.env.MODEL_NAME || "moonshotai/kimi-k3";
 
-const GLM_ENDPOINT = "https://integrate.api.nvidia.com/v1/chat/completions";
+const NVIDIA_ENDPOINT = "https://integrate.api.nvidia.com/v1/chat/completions";
 
-// ⚡ Optimized Axios Instance with Persistent TCP Sockets
 const axiosInstance = axios.create({
   timeout: 600000,
   httpsAgent: new https.Agent({
-    keepAlive: true,        // Reuses the same network socket for subsequent messages
-    maxSockets: 100,        // Max concurrent open sockets
-    keepAliveMsecs: 1000    // Keeps the channel hot
+    keepAlive: true,
+    maxSockets: 100,
+    keepAliveMsecs: 1000
   })
 });
 
@@ -37,7 +37,6 @@ function sessionFile(id) {
   return path.join(SESS_DIR, `${id}.json`);
 }
 
-// ⚡ Refactored to handle asynchronous non-blocking disk reads
 async function loadSession(id) {
   const f = sessionFile(id);
   try {
@@ -48,7 +47,6 @@ async function loadSession(id) {
   }
 }
 
-// ⚡ Refactored to handle asynchronous non-blocking disk writes
 async function saveSession(id, data) {
   try {
     await fs.writeFile(sessionFile(id), JSON.stringify(data));
@@ -59,8 +57,9 @@ async function saveSession(id, data) {
 
 function getConversationId(body) {
   if (body.conversation_id) return body.conversation_id;
-  const base = body.messages?.[0]?.content || "default";
-  return crypto.createHash("sha256").update(base).digest("hex");
+  const firstMsg = body.messages?.[0]?.content || "default";
+  const lastUserMsg = body.messages?.filter(m => m.role === "user").pop()?.content || "";
+  return crypto.createHash("sha256").update(firstMsg + lastUserMsg.slice(0, 50)).digest("hex");
 }
 
 app.post("/v1/chat/completions", async (req, res) => {
@@ -73,11 +72,8 @@ app.post("/v1/chat/completions", async (req, res) => {
     }
     activeStreams.set(convoId, res);
 
-    // ⚡ Await the async file reader
     const session = await loadSession(convoId);
-
     session.messages = body.messages || [];
-    // ⚡ Await the async file writer
     await saveSession(convoId, session);
 
     const finalMessages = [];
@@ -96,14 +92,14 @@ app.post("/v1/chat/completions", async (req, res) => {
     finalMessages.push(...session.messages);
 
     const upstream = await axiosInstance.post(
-      GLM_ENDPOINT,
+      NVIDIA_ENDPOINT,
       {
         ...body,
-        model: process.env.MODEL_NAME || "z-ai/glm5",
+        model: MODEL_NAME,
         messages: finalMessages,
         stream: true,
-        reasoning_effort: "high"// Preserved exactly as requested
-         // Preserved exactly as requested
+        max_tokens: body.max_tokens || 8192,
+        reasoning_effort: "high"
       },
       {
         headers: {
@@ -120,11 +116,11 @@ app.post("/v1/chat/completions", async (req, res) => {
     res.setHeader("Connection", "keep-alive");
 
     let buffer = "";
+    let isThinking = false;
 
     upstream.data.on("data", chunk => {
       buffer += chunk.toString();
 
-      // ⚡ High-performance stream scanning (Prevents fragmentation chunk drops)
       let lineIndex;
       while ((lineIndex = buffer.indexOf("\n")) !== -1) {
         const line = buffer.substring(0, lineIndex).trim();
@@ -132,10 +128,19 @@ app.post("/v1/chat/completions", async (req, res) => {
 
         if (!line.startsWith("data:")) continue;
 
-        // Fast slice execution instead of allocating new strings via string replacements
         const data = line.slice(5).trim();
 
         if (data === "[DONE]") {
+          if (isThinking) {
+            const closeTag = {
+              id: "chatcmpl-" + Date.now(),
+              object: "chat.completion.chunk",
+              created: Math.floor(Date.now() / 1000),
+              model: MODEL_NAME,
+              choices: [{ index: 0, delta: { content: "\n</think>\n\n" }, finish_reason: null }]
+            };
+            res.write(`data: ${JSON.stringify(closeTag)}\n\n`);
+          }
           res.write("data: [DONE]\n\n");
           res.end();
           return;
@@ -146,15 +151,34 @@ app.post("/v1/chat/completions", async (req, res) => {
           const delta = parsed?.choices?.[0]?.delta;
           if (!delta) continue;
 
+          let mappedContent = "";
+
+          // Maps reasoning stream tokens to <think> ... </think> tags
+          if (delta.reasoning_content) {
+            if (!isThinking) {
+              isThinking = true;
+              mappedContent = "<think>\n" + delta.reasoning_content;
+            } else {
+              mappedContent = delta.reasoning_content;
+            }
+          } else if (delta.content) {
+            if (isThinking) {
+              isThinking = false;
+              mappedContent = "\n</think>\n\n" + delta.content;
+            } else {
+              mappedContent = delta.content;
+            }
+          }
+
           const out = {
             id: parsed.id || "chatcmpl-" + Date.now(),
             object: "chat.completion.chunk",
             created: parsed.created || Math.floor(Date.now() / 1000),
-            model: process.env.MODEL_NAME || "z-ai/glm5",
+            model: MODEL_NAME,
             choices: [
               {
                 index: 0,
-                delta: delta,
+                delta: { content: mappedContent },
                 finish_reason: parsed.choices?.[0]?.finish_reason || null
               }
             ]
@@ -171,14 +195,32 @@ app.post("/v1/chat/completions", async (req, res) => {
     });
 
     upstream.data.on("error", err => {
-      console.error(err);
+      console.error("Upstream stream error:", err);
       res.end();
       activeStreams.delete(convoId);
     });
 
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "proxy failure" });
+    if (err.response?.data?.on) {
+      let errData = "";
+      err.response.data.on("data", c => (errData += c.toString()));
+      err.response.data.on("end", () => {
+        console.error(`Upstream Error [HTTP ${err.response.status}]:`, errData);
+      });
+    } else {
+      console.error("Proxy Error:", err.message);
+    }
+
+    if (!res.headersSent) {
+      res.status(err.response?.status || 500).json({
+        error: {
+          message: err.message || "Proxy failure",
+          status: err.response?.status
+        }
+      });
+    } else {
+      res.end();
+    }
     activeStreams.delete(convoId);
   }
 });
@@ -188,12 +230,11 @@ app.get("/ping", (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log("LLM Proxy running optimally");
+  console.log(`LLM Proxy running on port ${PORT}`);
 });
 
-// ⚡ Ultra-lean native keep-alive loop (Removes Axios wrapper allocations)
 setInterval(() => {
   http.get(`http://localhost:${PORT}/ping`, (res) => {
-    res.resume(); // Consume response memory immediately
+    res.resume();
   }).on("error", () => {});
 }, 240000);
